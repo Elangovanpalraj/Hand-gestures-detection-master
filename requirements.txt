@@ -5,3 +5,7 @@ numpy
 matplotlib
 flask
 pandas
+seaborn
+scikit-learn
+xgboost
+joblib
