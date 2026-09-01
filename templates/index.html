@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>Hand Gesture Detection</title>
+
+    <style>
+
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #111827;
+            color: white;
+            text-align: center;
+        }
+
+        h1 {
+            margin-top: 25px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: auto;
+            padding: 20px;
+        }
+
+        video {
+            width: 100%;
+            max-width: 640px;
+            border-radius: 15px;
+            background: black;
+            transform: scaleX(-1);
+        }
+
+        .result {
+            margin-top: 20px;
+            padding: 20px;
+            border-radius: 15px;
+            background: #1f2937;
+        }
+
+        #gesture {
+            font-size: 36px;
+            font-weight: bold;
+            color: #22c55e;
+        }
+
+        #confidence {
+            font-size: 20px;
+            margin-top: 10px;
+        }
+
+        button {
+            margin: 15px;
+            padding: 12px 25px;
+            border: none;
+            border-radius: 10px;
+            background: #2563eb;
+            color: white;
+            font-size: 18px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #1d4ed8;
+        }
+
+    </style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>🤚 Hand Gesture Detection</h1>
+
+    <video id="video"
+           autoplay
+           playsinline>
+    </video>
+
+    <br>
+
+    <button onclick="startCamera()">
+        Start Camera
+    </button>
+
+    <div class="result">
+
+        <div id="gesture">
+            Camera not started
+        </div>
+
+        <div id="confidence">
+            Confidence: 0%
+        </div>
+
+    </div>
+
+</div>
+
+
+<canvas id="canvas"
+        style="display:none;">
+</canvas>
+
+
+<script>
+
+const video =
+    document.getElementById("video");
+
+const canvas =
+    document.getElementById("canvas");
+
+const gesture =
+    document.getElementById("gesture");
+
+const confidence =
+    document.getElementById("confidence");
+
+
+let cameraStarted = false;
+
+
+async function startCamera() {
+
+    try {
+
+        const stream =
+            await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: false
+            });
+
+        video.srcObject = stream;
+
+        cameraStarted = true;
+
+        gesture.innerText =
+            "Detecting...";
+
+        detectLoop();
+
+    } catch (error) {
+
+        console.error(error);
+
+        gesture.innerText =
+            "Camera permission denied";
+
+    }
+}
+
+
+async function detectLoop() {
+
+    if (!cameraStarted) {
+        return;
+    }
+
+    if (video.readyState >= 2) {
+
+        canvas.width =
+            video.videoWidth;
+
+        canvas.height =
+            video.videoHeight;
+
+        const context =
+            canvas.getContext("2d");
+
+        context.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        canvas.toBlob(
+            async function(blob) {
+
+                const formData =
+                    new FormData();
+
+                formData.append(
+                    "image",
+                    blob,
+                    "frame.jpg"
+                );
+
+                try {
+
+                    const response =
+                        await fetch(
+                            "/predict",
+                            {
+                                method: "POST",
+                                body: formData
+                            }
+                        );
+
+                    const data =
+                        await response.json();
+
+                    if (data.error) {
+
+                        gesture.innerText =
+                            data.error;
+
+                        return;
+                    }
+
+                    gesture.innerText =
+                        data.gesture;
+
+                    confidence.innerText =
+                        "Confidence: "
+                        + data.confidence
+                        + "%";
+
+                } catch (error) {
+
+                    console.error(error);
+
+                }
+
+            },
+            "image/jpeg",
+            0.7
+        );
+    }
+
+    setTimeout(
+        detectLoop,
+        300
+    );
+}
+
+</script>
+
+</body>
+
+</html>
