@@ -34,7 +34,7 @@ from collections import deque
 
 
 # =============================================================================================
-df  = pd.read_csv(r"F:\Hand-gestures-detection-master\hand_landmarks_data.csv")
+df = pd.read_csv("hand_landmarks_data.csv")
 #print(df.head())
 # =============================================================================================
 
