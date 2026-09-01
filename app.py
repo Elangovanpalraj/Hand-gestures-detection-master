@@ -5,23 +5,40 @@ import numpy as np
 import pandas as pd
 import mediapipe as mp
 
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, render_template, request, jsonify
 
 
 # ============================================================
-# FLASK
+# Flask App
 # ============================================================
 
 app = Flask(__name__)
 
 
 # ============================================================
-# LOAD MODEL
+# Load trained model and metadata
 # ============================================================
 
 MODEL_FILE = "best_xgboost.joblib"
 CLASSES_FILE = "gesture_classes.joblib"
 FEATURES_FILE = "feature_columns.joblib"
+
+
+if not os.path.exists(MODEL_FILE):
+    raise FileNotFoundError(
+        f"{MODEL_FILE} not found. "
+        "Run train_model.py first."
+    )
+
+if not os.path.exists(CLASSES_FILE):
+    raise FileNotFoundError(
+        f"{CLASSES_FILE} not found."
+    )
+
+if not os.path.exists(FEATURES_FILE):
+    raise FileNotFoundError(
+        f"{FEATURES_FILE} not found."
+    )
 
 
 model = joblib.load(MODEL_FILE)
@@ -31,28 +48,34 @@ feature_columns = joblib.load(FEATURES_FILE)
 
 print("Model loaded successfully")
 print("Number of classes:", len(gesture_classes))
+print("Number of features:", len(feature_columns))
 
 
 # ============================================================
-# MEDIAPIPE
+# MediaPipe
 # ============================================================
 
 mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
 
 hands = mp_hands.Hands(
-    static_image_mode=False,
+    static_image_mode=True,
     max_num_hands=1,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+    min_detection_confidence=0.5
 )
 
 
 # ============================================================
-# EXTRACT LANDMARKS
+# Extract hand landmarks
 # ============================================================
 
 def extract_hand_landmarks(image):
+    """
+    Extract 21 MediaPipe hand landmarks.
+
+    Returns:
+        DataFrame containing x1,y1,...,x21,y21
+        or None if no hand is detected.
+    """
 
     image_rgb = cv2.cvtColor(
         image,
@@ -64,24 +87,30 @@ def extract_hand_landmarks(image):
     if not results.multi_hand_landmarks:
         return None
 
-    hand = results.multi_hand_landmarks[0]
+    hand_landmarks = results.multi_hand_landmarks[0]
 
     landmarks = {}
 
-    for i, landmark in enumerate(hand.landmark):
-
-        # Dataset uses x1...x21
-        landmarks[f"x{i + 1}"] = landmark.x
-        landmarks[f"y{i + 1}"] = landmark.y
+    for i, landmark in enumerate(
+        hand_landmarks.landmark,
+        start=1
+    ):
+        landmarks[f"x{i}"] = landmark.x
+        landmarks[f"y{i}"] = landmark.y
 
     return pd.DataFrame([landmarks])
 
 
 # ============================================================
-# NORMALIZE COORDINATES
+# Normalize coordinates
 # ============================================================
 
 def normalize_coordinates(df):
+    """
+    Normalize hand landmarks exactly like training pipeline.
+    """
+
+    df = df.copy()
 
     x_coords = [
         col for col in df.columns
@@ -96,10 +125,11 @@ def normalize_coordinates(df):
     x_vals = df[x_coords].copy()
     y_vals = df[y_coords].copy()
 
-    wrist_x = x_vals.iloc[:, 0].copy()
-    wrist_y = y_vals.iloc[:, 0].copy()
+    # Wrist = landmark 1
+    wrist_x = x_vals["x1"]
+    wrist_y = y_vals["y1"]
 
-    # Move wrist to origin
+    # Recenter around wrist
     x_vals = x_vals.subtract(
         wrist_x,
         axis=0
@@ -110,50 +140,52 @@ def normalize_coordinates(df):
         axis=0
     )
 
-    # Same normalization used during training
-    distance = np.sqrt(
+    # Same scale reference used during training
+    # landmark 13 = middle finger tip in your dataset
+    scale = np.sqrt(
         x_vals["x13"] ** 2 +
         y_vals["y13"] ** 2
     )
 
-    distance = distance.replace(
-        0,
-        1e-8
-    )
+    scale = scale.replace(0, 1)
 
     x_vals = x_vals.div(
-        distance,
+        scale,
         axis=0
     )
 
     y_vals = y_vals.div(
-        distance,
+        scale,
         axis=0
     )
 
+    # Interleave x,y
     normalized_data = {}
 
-    for x_col, y_col in zip(
-        x_vals.columns,
-        y_vals.columns
-    ):
+    for i in range(1, 22):
 
-        normalized_data[x_col] = x_vals[x_col]
-        normalized_data[y_col] = y_vals[y_col]
+        normalized_data[f"x{i}"] = x_vals[f"x{i}"]
 
-    return pd.DataFrame(
+        normalized_data[f"y{i}"] = y_vals[f"y{i}"]
+
+    normalized_df = pd.DataFrame(
         normalized_data,
         index=df.index
     )
 
+    return normalized_df
+
 
 # ============================================================
-# FINGER DISTANCE FEATURES
+# Finger distance features
 # ============================================================
 
-def calculate_finger_tip_distances(data):
+def calculate_finger_tip_distances(df):
+    """
+    Create the same additional features used during training.
+    """
 
-    data = data.copy()
+    df = df.copy()
 
     TIP_INDICES = {
         "thumb": 5,
@@ -171,7 +203,10 @@ def calculate_finger_tip_distances(data):
         "pinky": 18
     }
 
-    # Pairwise fingertip distances
+    # --------------------------------------------------------
+    # Pairwise finger tip distances
+    # --------------------------------------------------------
+
     tips = list(TIP_INDICES.items())
 
     for i in range(len(tips)):
@@ -182,15 +217,18 @@ def calculate_finger_tip_distances(data):
 
             name2, tip2 = tips[j]
 
-            data[f"dist_{name1}_{name2}"] = np.sqrt(
-                (data[f"x{tip1}"] - data[f"x{tip2}"]) ** 2
+            df[f"dist_{name1}_{name2}"] = np.sqrt(
+                (df[f"x{tip1}"] - df[f"x{tip2}"]) ** 2
                 +
-                (data[f"y{tip1}"] - data[f"y{tip2}"]) ** 2
+                (df[f"y{tip1}"] - df[f"y{tip2}"]) ** 2
             )
 
-    # Thumb distances
-    thumb_x = data["x5"]
-    thumb_y = data["y5"]
+    # --------------------------------------------------------
+    # Thumb to other finger tips
+    # --------------------------------------------------------
+
+    thumb_x = df["x5"]
+    thumb_y = df["y5"]
 
     for finger in [
         "index",
@@ -201,57 +239,87 @@ def calculate_finger_tip_distances(data):
 
         tip = TIP_INDICES[finger]
 
-        data[f"dist_thumb_{finger}"] = np.sqrt(
-            (thumb_x - data[f"x{tip}"]) ** 2
+        df[f"dist_thumb_{finger}"] = np.sqrt(
+            (thumb_x - df[f"x{tip}"]) ** 2
             +
-            (thumb_y - data[f"y{tip}"]) ** 2
+            (thumb_y - df[f"y{tip}"]) ** 2
         )
 
+    # --------------------------------------------------------
     # Finger lengths
+    # --------------------------------------------------------
+
     for finger, base in FINGER_BASES.items():
 
         tip = TIP_INDICES[finger]
 
-        data[f"len_{finger}"] = np.sqrt(
-            (data[f"x{base}"] - data[f"x{tip}"]) ** 2
+        df[f"len_{finger}"] = np.sqrt(
+            (df[f"x{base}"] - df[f"x{tip}"]) ** 2
             +
-            (data[f"y{base}"] - data[f"y{tip}"]) ** 2
+            (df[f"y{base}"] - df[f"y{tip}"]) ** 2
         )
 
-    return data
+    return df
 
 
 # ============================================================
-# PREDICT
+# Complete preprocessing
 # ============================================================
 
-def predict_gesture(image):
+def preprocess_image(image):
+    """
+    Image -> MediaPipe landmarks -> normalized features
+    """
 
-    landmarks = extract_hand_landmarks(
-        image
-    )
+    landmarks = extract_hand_landmarks(image)
 
     if landmarks is None:
-        return "No Hand Detected", 0.0
+        return None
 
-    # Normalize
     normalized = normalize_coordinates(
         landmarks
     )
 
-    # Add engineered features
-    features = calculate_finger_tip_distances(
+    enhanced = calculate_finger_tip_distances(
         normalized
     )
 
-    # IMPORTANT:
-    # Ensure exact same column order as training
-    features = features.reindex(
-        columns=feature_columns,
-        fill_value=0
+    # --------------------------------------------------------
+    # Ensure exact training feature order
+    # --------------------------------------------------------
+
+    for column in feature_columns:
+
+        if column not in enhanced.columns:
+            enhanced[column] = 0.0
+
+    enhanced = enhanced[
+        feature_columns
+    ]
+
+    enhanced = enhanced.astype(
+        np.float32
     )
 
-    # Prediction
+    return enhanced
+
+
+# ============================================================
+# Prediction
+# ============================================================
+
+def predict_gesture(image):
+
+    features = preprocess_image(
+        image
+    )
+
+    if features is None:
+        return {
+            "gesture": "No Hand Detected",
+            "confidence": 0.0
+        }
+
     probabilities = model.predict_proba(
         features
     )[0]
@@ -268,22 +336,41 @@ def predict_gesture(image):
         probabilities[best_index]
     )
 
-    return gesture, confidence
+    return {
+        "gesture": str(gesture),
+        "confidence": confidence
+    }
 
 
 # ============================================================
-# HOME PAGE
+# Home page
 # ============================================================
 
 @app.route("/")
-def index():
+def home():
+
     return render_template(
         "index.html"
     )
 
 
 # ============================================================
-# PREDICTION API
+# Health check
+# ============================================================
+
+@app.route("/health")
+def health():
+
+    return jsonify({
+        "status": "ok",
+        "model_loaded": True,
+        "classes": len(gesture_classes),
+        "features": len(feature_columns)
+    })
+
+
+# ============================================================
+# Prediction API
 # ============================================================
 
 @app.route(
@@ -292,47 +379,51 @@ def index():
 )
 def predict():
 
-    if "image" not in request.files:
+    try:
 
-        return jsonify({
-            "error": "No image received"
-        }), 400
+        if "image" not in request.files:
 
-    file = request.files["image"]
+            return jsonify({
+                "error": "No image uploaded"
+            }), 400
 
-    image_bytes = file.read()
+        file = request.files["image"]
 
-    image_array = np.frombuffer(
-        image_bytes,
-        np.uint8
-    )
+        image_bytes = file.read()
 
-    image = cv2.imdecode(
-        image_array,
-        cv2.IMREAD_COLOR
-    )
-
-    if image is None:
-
-        return jsonify({
-            "error": "Invalid image"
-        }), 400
-
-    gesture, confidence = predict_gesture(
-        image
-    )
-
-    return jsonify({
-        "gesture": gesture,
-        "confidence": round(
-            confidence * 100,
-            2
+        image_array = np.frombuffer(
+            image_bytes,
+            np.uint8
         )
-    })
+
+        image = cv2.imdecode(
+            image_array,
+            cv2.IMREAD_COLOR
+        )
+
+        if image is None:
+
+            return jsonify({
+                "error": "Invalid image"
+            }), 400
+
+        result = predict_gesture(
+            image
+        )
+
+        return jsonify(result)
+
+    except Exception as e:
+
+        print("Prediction error:", e)
+
+        return jsonify({
+            "error": str(e)
+        }), 500
 
 
 # ============================================================
-# RUN
+# Render entry point
 # ============================================================
 
 if __name__ == "__main__":
@@ -340,11 +431,12 @@ if __name__ == "__main__":
     port = int(
         os.environ.get(
             "PORT",
-            10000
+            5000
         )
     )
 
     app.run(
         host="0.0.0.0",
-        port=port
+        port=port,
+        debug=False
     )
