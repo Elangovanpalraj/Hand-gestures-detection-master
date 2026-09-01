@@ -1,4 +1,7 @@
 opencv-python
+opencv-contrib-python
 mediapipe
 numpy
+matplotlib
 flask
+pandas
